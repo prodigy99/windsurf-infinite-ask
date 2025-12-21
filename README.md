@@ -74,5 +74,3 @@ npx vsce package
 
 - **QQ群**: 1076321843
 
----
-*Made with ❤️ by Open Source Community*
