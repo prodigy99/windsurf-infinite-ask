@@ -19,13 +19,21 @@
             {
                 "command": "cleanInfiniteAsk.configure",
                 "title": "Clean Infinite Ask: Configure Now"
+            },
+            {
+                "command": "cleanInfiniteAsk.test",
+                "title": "Clean Infinite Ask: Test Dialog"
             }
         ]
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",
         "compile": "tsc -p ./",
-        "watch": "tsc -watch -p ./"
+        "watch": "tsc -watch -p ./",
+        "build:dev": "node scripts/build.js dev",
+        "build:prod": "node scripts/build.js prod",
+        "package:dev": "npm run build:dev && vsce package",
+        "package:prod": "npm run build:prod && vsce package"
     },
     "devDependencies": {
         "@types/node": "^18.0.0",

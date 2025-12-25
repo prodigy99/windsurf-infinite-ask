@@ -19,8 +19,11 @@ const os = require("os");
 const { spawn } = require("child_process");
 
 // ==================== Constants ====================
-const VERSION = '1.0.0-clean';
+const VERSION = '1.0.0';
 const REQUEST_TIMEOUT = 24 * 60 * 60 * 1000; // 24 hours
+const IPC_PORT = parseInt(process.env.INFINITE_ASK_PORT || '19824', 10);
+const IPC_HOST = process.env.INFINITE_ASK_HOST || '127.0.0.1';
+const IPC_TIMEOUT = 24 * 60 * 60 * 1000; // 24 hours - user may take a long time to respond
 
 // ==================== Logging ====================
 const DEBUG_MODE = process.env.DEBUG_MCP === '1';
@@ -34,8 +37,122 @@ function log(level, message, data) {
 
 // ==================== Request Handling ====================
 async function sendAskContinue(reason, workspace) {
-    // Directly use local popup, no WebSocket fallback needed
-    return showLocalPopup(reason);
+    // Only use VSCode IPC (Webview dialog)
+    // No fallback to system popup - if IPC fails, end conversation
+    try {
+        const result = await tryVSCodeIPC(reason, workspace);
+        if (result !== null) {
+            log('INFO', 'Used VSCode IPC dialog', { workspace });
+            return result;
+        }
+    } catch (e) {
+        log('ERROR', 'VSCode IPC failed', { error: e.message });
+    }
+    
+    // IPC failed - cannot show dialog
+    log('WARN', 'VSCode IPC not available, ending conversation');
+    return { shouldContinue: false };
+}
+
+// ==================== Port Discovery ====================
+function findPortForWorkspace(workspace) {
+    const portsDir = path.join(os.homedir(), '.infinite-ask', 'ports');
+    
+    if (!fs.existsSync(portsDir)) {
+        log('DEBUG', 'Ports directory does not exist');
+        return null;
+    }
+    
+    // First, try to find exact match by workspace hash
+    const workspaceHash = Buffer.from(workspace).toString('base64').replace(/[/+=]/g, '_');
+    const exactFile = path.join(portsDir, `${workspaceHash}.json`);
+    
+    if (fs.existsSync(exactFile)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(exactFile, 'utf8'));
+            log('INFO', `Found exact port match for workspace`, { port: data.port, workspace });
+            return data.port;
+        } catch (e) {
+            log('ERROR', 'Failed to read port file', { file: exactFile, error: e.message });
+        }
+    }
+    
+    // Fallback: scan all port files and find the most recent one
+    try {
+        const files = fs.readdirSync(portsDir).filter(f => f.endsWith('.json'));
+        let bestMatch = null;
+        let latestTimestamp = 0;
+        
+        for (const file of files) {
+            try {
+                const data = JSON.parse(fs.readFileSync(path.join(portsDir, file), 'utf8'));
+                if (data.timestamp > latestTimestamp) {
+                    latestTimestamp = data.timestamp;
+                    bestMatch = data;
+                }
+            } catch (e) {
+                // Skip invalid files
+            }
+        }
+        
+        if (bestMatch) {
+            log('INFO', `Using most recent port`, { port: bestMatch.port, workspace: bestMatch.workspace });
+            return bestMatch.port;
+        }
+    } catch (e) {
+        log('ERROR', 'Failed to scan ports directory', { error: e.message });
+    }
+    
+    return null;
+}
+
+// ==================== VSCode IPC ====================
+function tryVSCodeIPC(reason, workspace) {
+    return new Promise((resolve) => {
+        // Try to find the correct port for this workspace
+        const port = findPortForWorkspace(workspace) || IPC_PORT;
+        
+        const http = require('http');
+        const postData = JSON.stringify({ reason, workspace });
+        
+        log('DEBUG', `Connecting to IPC server`, { host: IPC_HOST, port });
+        
+        const req = http.request({
+            hostname: IPC_HOST,
+            port: port,
+            path: '/ask',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData)
+            },
+            timeout: IPC_TIMEOUT
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => {
+                try {
+                    const result = JSON.parse(data);
+                    resolve(result);
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        });
+        
+        req.on('error', (e) => {
+            log('ERROR', 'IPC request error', { error: e.message });
+            resolve(null);
+        });
+        req.on('timeout', () => {
+            log('WARN', 'IPC request timeout');
+            req.destroy();
+            resolve(null);
+        });
+        
+        req.write(postData);
+        req.end();
+    });
 }
 
 // ==================== Local Popups ====================
